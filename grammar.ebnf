@@ -1,0 +1,294 @@
+# ANNA Language Grammar (EBNF Notation)
+# This file defines the formal grammar of the ANNA language.
+# Terminals are in UPPERCASE or quoted strings.
+# Non-terminals are in snake_case.
+
+# ─────────────────────────────────────────────
+# TOP-LEVEL
+# ─────────────────────────────────────────────
+
+program         ::= module_decl '{' top_level_item* '}'
+                  | top_level_item*
+
+top_level_item  ::= fn_def
+                  | type_def
+                  | const_def
+                  | patch_def
+                  | patch_group_def
+                  | query_def
+                  | import_stmt
+
+# ─────────────────────────────────────────────
+# MODULE
+# ─────────────────────────────────────────────
+
+module_decl     ::= 'module' module_path annotation* ('{' ... '}' | ε)
+module_path     ::= IDENT ('.' IDENT)*
+
+# ─────────────────────────────────────────────
+# IMPORTS
+# ─────────────────────────────────────────────
+
+import_stmt     ::= 'use' module_path ('.' '{' import_list '}' | '.' '*' | ε)
+import_list     ::= import_item (',' import_item)*
+import_item     ::= IDENT | TYPE_IDENT | IDENT 'as' IDENT
+
+# ─────────────────────────────────────────────
+# FUNCTION DEFINITION
+# ─────────────────────────────────────────────
+
+fn_def          ::= annotation* 'fn' IDENT
+                    '(' param_list? ')'
+                    ('->' type_expr)?
+                    effect_clause?
+                    fn_body
+
+param_list      ::= param (',' param)*
+param           ::= IDENT ':' type_expr ('=' expr)?
+
+effect_clause   ::= ('!' IDENT)+
+
+fn_body         ::= '{' fn_statement* '}'
+fn_statement    ::= intent_decl
+                  | require_decl
+                  | ensure_decl
+                  | named_block
+                  | stmt
+
+intent_decl     ::= 'intent' STRING
+require_decl    ::= 'require' expr annotation*
+ensure_decl     ::= 'ensure'  expr annotation*
+
+named_block     ::= '@block' '(' STRING ')' block
+block           ::= '{' stmt* '}'
+
+# ─────────────────────────────────────────────
+# STATEMENTS
+# ─────────────────────────────────────────────
+
+stmt            ::= let_stmt
+                  | return_stmt
+                  | expr_stmt
+                  | if_stmt
+                  | match_stmt
+                  | loop_stmt
+                  | while_stmt
+                  | for_stmt
+                  | break_stmt
+                  | continue_stmt
+
+let_stmt        ::= 'let' 'mut'? IDENT (':' type_expr)? '=' expr
+return_stmt     ::= 'return' expr?
+expr_stmt       ::= expr
+
+if_stmt         ::= 'if' expr block ('else' (if_stmt | block))?
+loop_stmt       ::= 'loop' block
+while_stmt      ::= 'while' expr block
+for_stmt        ::= 'for' pattern 'in' expr block
+break_stmt      ::= 'break' expr?
+continue_stmt   ::= 'continue'
+
+match_stmt      ::= 'match' expr '{' match_arm+ '}'
+match_arm       ::= '|' pattern '=>' (expr | block)
+pattern         ::= TYPE_IDENT ('{' field_pattern_list '}')? 
+                  | '_' 
+                  | literal 
+                  | IDENT
+field_pattern_list ::= field_pattern (',' field_pattern)*
+field_pattern      ::= IDENT | IDENT ':' pattern
+
+# ─────────────────────────────────────────────
+# EXPRESSIONS
+# ─────────────────────────────────────────────
+
+expr            ::= primary_expr (binary_op primary_expr)*
+                  | unary_op expr
+                  | expr '|>' expr              # pipeline operator
+                  | expr '?' expr ':' expr       # ternary
+                  | closure_expr
+
+primary_expr    ::= literal
+                  | IDENT
+                  | struct_ref_path
+                  | call_expr
+                  | method_chain
+                  | block_expr
+                  | tuple_expr
+                  | array_expr
+
+call_expr       ::= (IDENT | struct_ref_path) '(' arg_list? ')'
+arg_list        ::= arg (',' arg)*
+arg             ::= (IDENT ':')? expr             # named or positional
+
+method_chain    ::= expr '.' IDENT '(' arg_list? ')'
+
+block_expr      ::= '{' stmt* expr '}'            # last expr is value
+tuple_expr      ::= '(' expr (',' expr)+ ')'
+array_expr      ::= '[' (expr (',' expr)*)? ']'
+
+struct_ref_path ::= '#' IDENT ('.' IDENT)*        # structural path reference
+
+closure_expr    ::= '|' param_list? '|' (expr | block)
+
+binary_op       ::= '+' | '-' | '*' | '/' | '%'
+                  | '==' | '!=' | '<' | '>' | '<=' | '>='
+                  | '&&' | '||'
+                  | '&' | '|' | '^' | '<<' | '>>'
+                  | '≈'                            # approximate equality
+                  | '..'                           # range
+                  | '..='                          # inclusive range
+
+unary_op        ::= '-' | '!' | '~'
+
+literal         ::= INTEGER | FLOAT | STRING | RAW_STRING | BOOL | '()'
+
+# ─────────────────────────────────────────────
+# TYPES
+# ─────────────────────────────────────────────
+
+type_expr       ::= base_type
+                  | generic_type
+                  | tuple_type
+                  | fn_type
+                  | refined_type
+                  | option_type
+                  | result_type
+
+base_type       ::= TYPE_IDENT
+generic_type    ::= TYPE_IDENT '<' type_list '>'
+type_list       ::= type_expr (',' type_expr)*
+tuple_type      ::= '(' type_expr (',' type_expr)+ ')'
+fn_type         ::= 'fn' '(' type_list? ')' '->' type_expr effect_clause?
+option_type     ::= 'Option' '<' type_expr '>'
+result_type     ::= 'Result' '<' type_expr ',' type_expr '>'
+
+refined_type    ::= type_expr 'where' expr        # dependent/refined type
+
+# ─────────────────────────────────────────────
+# TYPE DEFINITIONS
+# ─────────────────────────────────────────────
+
+type_def        ::= annotation* 'type' TYPE_IDENT generic_params? type_body
+
+generic_params  ::= '<' TYPE_IDENT (',' TYPE_IDENT)* '>'
+
+type_body       ::= struct_body      # product type
+                  | enum_body        # sum type
+                  | alias_body       # type alias
+
+struct_body     ::= '{' field_def* '}'
+field_def       ::= annotation* IDENT ':' refined_type
+
+enum_body       ::= ('{' | ε) enum_variant+ ('}' | ε)
+enum_variant    ::= '|' TYPE_IDENT ('{' field_def* '}' | '(' type_list ')' | ε)
+
+alias_body      ::= '=' type_expr ('where' expr)?
+
+# ─────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────
+
+const_def       ::= annotation* 'const' CONST_IDENT ':' type_expr '=' expr
+
+# ─────────────────────────────────────────────
+# PATCH SYSTEM (AI-NATIVE)
+# ─────────────────────────────────────────────
+
+patch_def       ::= 'patch' struct_ref_path annotation* patch_body
+
+patch_body      ::= patch_op_replace
+                  | patch_op_insert_before
+                  | patch_op_insert_after
+                  | patch_op_insert_case
+                  | patch_op_delete
+                  | patch_op_rename
+                  | patch_op_extract
+                  | patch_op_inline
+                  | patch_op_params
+                  | patch_op_fields
+                  | patch_op_generic
+
+patch_op_replace       ::= 'replace_with' '{' ... '}'
+patch_op_insert_before ::= 'insert_before' '{' ... '}'
+patch_op_insert_after  ::= 'insert_after'  '{' ... '}'
+patch_op_insert_case   ::= 'insert_case' ('before' | 'after') struct_ref_path '{' enum_variant+ '}'
+patch_op_delete        ::= 'delete'
+patch_op_rename        ::= 'rename_to' IDENT
+patch_op_extract       ::= 'extract_range' '(' 'block_id' ':' STRING ')' 'into' IDENT
+patch_op_inline        ::= 'inline' struct_ref_path
+patch_op_params        ::= '{' param_patch_op* '}'
+patch_op_fields        ::= '{' field_patch_op* '}'
+patch_op_generic       ::= '{' ... '}'
+
+param_patch_op  ::= ('add_param' param annotation*)
+                  | ('remove_param' IDENT ':' type_expr)
+                  | ('rename_param' IDENT 'to' IDENT)
+                  | ('change_param_type' IDENT ':' type_expr '=>' type_expr)
+
+field_patch_op  ::= ('add_field' field_def annotation*)
+                  | ('remove_field' IDENT ':' type_expr)
+                  | ('rename_field' IDENT 'to' IDENT)
+                  | ('change_type' IDENT ':' type_expr '=>' type_expr annotation*)
+
+patch_group_def ::= 'patch_group' annotation* '{' patch_def+ '}'
+
+# ─────────────────────────────────────────────
+# QUERY SYSTEM (AI-NATIVE)
+# ─────────────────────────────────────────────
+
+query_def       ::= 'query' annotation* '{' query_clause+ '}'
+
+query_clause    ::= find_clause
+                  | where_clause
+                  | return_clause
+                  | limit_clause
+
+find_clause     ::= 'find' query_target
+where_clause    ::= 'where' query_predicate
+return_clause   ::= 'return' '[' IDENT (',' IDENT)* ']'
+limit_clause    ::= 'limit' INTEGER
+
+query_target    ::= 'fn' | 'type' | 'const' | 'patch' | 'module' | 'field' | 'param'
+
+query_predicate ::= IDENT '(' query_pred_args ')'
+                  | IDENT comparison_op literal
+                  | 'has_effect' '(' '!' IDENT ')'
+                  | '!' query_predicate             # negation
+                  | query_predicate '&&' query_predicate
+                  | query_predicate '||' query_predicate
+
+query_pred_args ::= (query_pred_arg (',' query_pred_arg)*)?
+query_pred_arg  ::= struct_ref_path | STRING | literal
+
+# ─────────────────────────────────────────────
+# ANNOTATIONS
+# ─────────────────────────────────────────────
+
+annotation      ::= '@' IDENT ('(' ann_arg_list? ')')?
+
+ann_arg_list    ::= ann_arg (',' ann_arg)*
+ann_arg         ::= literal
+                  | '@' IDENT                      # reference to another annotation target
+                  | '[' ann_arg (',' ann_arg)* ']'
+                  | struct_ref_path
+
+# ─────────────────────────────────────────────
+# LEXICAL TERMINALS
+# ─────────────────────────────────────────────
+
+IDENT       ::= [a-z_][a-z0-9_]*
+TYPE_IDENT  ::= [A-Z][A-Za-z0-9]*
+CONST_IDENT ::= [A-Z_][A-Z0-9_]+
+INTEGER     ::= [0-9]+ | '0x'[0-9a-fA-F]+
+FLOAT       ::= [0-9]+'.'[0-9]+('e'[+-]?[0-9]+)?
+STRING      ::= '"' ([^"\\] | '\\' .)* '"'
+RAW_STRING  ::= '`' [^`]* '`'
+BOOL        ::= 'true' | 'false'
+
+# Keywords (reserved, cannot be used as identifiers):
+# fn, type, const, let, mut, return, if, else, match, loop, while, for,
+# break, continue, module, use, as, where, patch, patch_group, query,
+# find, return, limit, intent, require, ensure, insert_before, insert_after,
+# insert_case, replace_with, delete, rename_to, extract_range, inline,
+# add_param, remove_param, rename_param, add_field, remove_field,
+# change_type, change_param_type, before, after, true, false, in

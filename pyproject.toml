@@ -1,0 +1,18 @@
+[project]
+name = "anna-lang"
+version = "0.1.0"
+description = "ANNA — AI-Native Notation & Action Language"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+anna = "anna.__main__:main"
+
+[build-system]
+requires      = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["anna*"]

@@ -1,0 +1,131 @@
+// ANNA Language — 示例：电商购物车
+// examples/01_ecommerce_cart.anna
+//
+// 展示：模块声明、类型定义、契约系统、@ai_context
+
+module ecommerce.cart
+    @version("1.0.0")
+    @stability(stable)
+    @owner("team-backend")
+    @ai_context(`
+        购物车采用不可变数据模型（每次操作返回新 Cart）。
+        价格单位为分（Int64），避免浮点累积误差。
+        version 字段用于乐观并发控制，每次修改必须递增。
+        折扣计算顺序：用户专属折扣 > 品类折扣 > 全场折扣。
+        空购物车 items 为空向量，不是 None。
+    `)
+{
+
+    // ── 类型定义 ────────────────────────────
+
+    type CartStatus {
+        | Active
+        | CheckedOut { order_id: UInt64 }
+        | Abandoned  { at: UInt64 }
+    }
+
+    type Cart {
+        id:       UInt64
+        user_id:  UInt64
+        items:    Vec<CartItem>
+        status:   CartStatus
+        version:  UInt32
+    }
+
+    type CartItem {
+        product_id: UInt64
+        quantity:   UInt32 where self > 0
+        unit_price: Int64  where self >= 0
+    }
+
+    type CartError {
+        | InvalidQuantity  { given: UInt32 }
+        | NegativePrice    { given: Int64 }
+        | CartNotActive    { status: CartStatus }
+        | ProductNotFound  { product_id: UInt64 }
+    }
+
+    const MAX_ITEMS: UInt32 = 100
+    const MAX_QUANTITY_PER_ITEM: UInt32 = 999
+
+    // ── 函数定义 ────────────────────────────
+
+    @public
+    fn add_item(cart: Cart, item: CartItem) -> Result<Cart, CartError> {
+        intent "向购物车添加商品，若商品已存在则合并数量"
+
+        require item.quantity > 0
+            @msg("商品数量必须大于零")
+        require item.unit_price >= 0
+            @msg("商品单价不能为负")
+        require cart.items.len() < MAX_ITEMS
+            @msg("购物车商品种类不能超过上限")
+
+        @block("check_active")
+        let () = {
+            match cart.status {
+                | Active => ()
+                | _ => return Err(CartError::CartNotActive { status: cart.status })
+            }
+        }
+
+        @block("dedup_and_merge")
+        let updated_items = {
+            let existing_idx = cart.items.find_idx(|i| i.product_id == item.product_id)
+            match existing_idx {
+                | Some(idx) => cart.items.map_at(idx, |i| CartItem {
+                    quantity: i.quantity + item.quantity,
+                    ..i
+                })
+                | None => cart.items.append(item)
+            }
+        }
+
+        let new_cart = Cart {
+            items:   updated_items,
+            version: cart.version + 1,
+            ..cart
+        }
+
+        ensure new_cart.version == cart.version + 1
+            @msg("版本号必须恰好递增 1")
+        ensure new_cart.items.len() >= cart.items.len()
+            @msg("添加后商品种类不得减少")
+
+        return Ok(new_cart)
+    }
+
+    @public
+    fn remove_item(cart: Cart, product_id: UInt64) -> Result<Cart, CartError> {
+        intent "从购物车移除指定商品"
+
+        require cart.items.any(|i| i.product_id == product_id)
+            @msg("商品不在购物车中")
+
+        let updated_items = cart.items.filter(|i| i.product_id != product_id)
+
+        return Ok(Cart {
+            items:   updated_items,
+            version: cart.version + 1,
+            ..cart
+        })
+    }
+
+    @public
+    fn total_price(cart: Cart) -> Int64 {
+        intent "计算购物车总价（单位：分）"
+
+        let total = cart.items.fold(0, |acc: Int64, item: CartItem|
+            acc + item.unit_price * item.quantity
+        )
+
+        ensure total >= 0 @msg("总价不能为负")
+        return total
+    }
+
+    @public
+    fn item_count(cart: Cart) -> UInt32 {
+        intent "计算购物车中所有商品的总数量（含重复）"
+        return cart.items.fold(0, |acc: UInt32, item: CartItem| acc + item.quantity)
+    }
+}

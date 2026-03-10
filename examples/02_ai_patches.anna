@@ -1,0 +1,148 @@
+// ANNA Language — 示例：AI Patch 操作
+// examples/02_ai_patches.anna
+//
+// 展示：patch 系统如何让 AI 以结构化方式修改代码
+// 这些 patch 由 AI 生成，用于在不读取完整代码的情况下精准修改特定节点
+
+// ── Patch 1：添加新的错误变体 ────────────────
+
+patch #ecommerce.cart.CartError
+    @reason("添加购物车商品数量超上限的错误类型")
+    @author(@ai)
+    @confidence(0.97)
+    @ticket("FEAT-201")
+{
+    insert_case after #ecommerce.cart.CartError.ProductNotFound {
+        | QuantityLimitExceeded { product_id: UInt64, limit: UInt32, requested: UInt32 }
+    }
+}
+
+
+// ── Patch 2：替换函数体（更换算法）─────────
+
+patch #ecommerce.cart.total_price
+    @reason("优化总价计算：提前过滤零数量商品，避免无效乘法")
+    @author(@ai)
+    @confidence(0.91)
+    @review_required(confidence < 0.95)
+{
+    replace_with {
+        intent "计算购物车总价（单位：分），过滤无效项"
+
+        require cart.items.len() >= 0
+
+        let valid_items = cart.items.filter(|i| i.quantity > 0)
+        let total = valid_items.fold(0, |acc: Int64, item: CartItem|
+            acc + item.unit_price * item.quantity
+        )
+
+        ensure total >= 0
+        return total
+    }
+}
+
+
+// ── Patch 3：添加参数（带默认值）────────────
+
+patch #ecommerce.cart.add_item.params
+    @reason("支持设置商品添加的来源渠道，用于埋点分析")
+    @author(@ai)
+    @confidence(0.88)
+{
+    add_param source: Option<Str> = None @position(last)
+}
+
+
+// ── Patch 4：重命名函数（级联更新引用）──────
+
+patch #ecommerce.cart.item_count
+    @reason("item_count 语义不明确，改为更精确的 total_quantity")
+    @author(@ai)
+    @confidence(0.99)
+    @cascade(true)
+{
+    rename_to total_quantity
+}
+
+
+// ── Patch 5：事务性 Patch 组 ─────────────────
+// 以下三个变更必须同时成功或同时回滚
+
+patch_group
+    @id("refactor-cart-v2")
+    @atomic
+    @reason("Cart v2：将 version 字段类型从 UInt32 升级为 UInt64，适配高并发场景")
+    @author(@ai)
+    @ticket("PERF-88")
+{
+    patch #ecommerce.cart.Cart.fields {
+        change_type version: UInt32 => UInt64
+            @reason("UInt32 最大值约42亿，高并发下存在溢出风险")
+    }
+
+    patch #ecommerce.cart.add_item.body
+        @reason("更新 ensure 条件中的类型引用")
+    {
+        replace_with {
+            intent "向购物车添加商品，若商品已存在则合并数量（v2）"
+
+            require item.quantity > 0
+            require item.unit_price >= 0
+            require cart.items.len() < MAX_ITEMS
+
+            @block("check_active")
+            let () = {
+                match cart.status {
+                    | Active => ()
+                    | _ => return Err(CartError::CartNotActive { status: cart.status })
+                }
+            }
+
+            @block("dedup_and_merge")
+            let updated_items = {
+                let existing_idx = cart.items.find_idx(|i| i.product_id == item.product_id)
+                match existing_idx {
+                    | Some(idx) => cart.items.map_at(idx, |i| CartItem {
+                        quantity: i.quantity + item.quantity,
+                        ..i
+                    })
+                    | None => cart.items.append(item)
+                }
+            }
+
+            let new_cart = Cart {
+                items:   updated_items,
+                version: cart.version + 1,
+                ..cart
+            }
+
+            ensure new_cart.version == cart.version + 1
+            ensure new_cart.items.len() >= cart.items.len()
+            return Ok(new_cart)
+        }
+    }
+
+    patch #ecommerce.cart.CartItem.fields {
+        add_field added_at: UInt64
+            @reason("记录商品加入购物车的时间戳，用于排期过期清理")
+    }
+}
+
+
+// ── Patch 6：条件 Patch（只在特定条件下应用）─
+
+patch #ecommerce.cart.remove_item
+    @when(project.version < "2.0.0")
+    @reason("v2.0 前需要在删除时记录审计日志，v2.0 后由框架层统一处理")
+    @author(@ai)
+    @confidence(0.85)
+{
+    insert_before {
+        let audit_entry = AuditLog {
+            action:    "cart.remove_item",
+            entity_id: product_id,
+            user_id:   cart.user_id,
+        }
+        audit_log.append(audit_entry)
+    }
+}
