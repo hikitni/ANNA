@@ -211,8 +211,11 @@ class Parser:
         effects = []
         while self._check(TK.BANG):
             self._advance()
-            eff = self._expect(TK.IDENT).value
-            effects.append(eff)
+            # Effect可以是普通的snake_case IDENT，也可以是大写的TYPE_IDENT(如 IO)
+            tok = self._match(TK.IDENT, TK.TYPE_IDENT)
+            if not tok:
+                raise ParseError("期望 Effect 名称 (IDENT 或 TYPE_IDENT)", self._cur)
+            effects.append(tok.value)
         return tuple(effects)
 
     def _parse_fn_body(self) -> FnBody:
@@ -832,7 +835,9 @@ class Parser:
         all_annots = meta.annotations + extra_meta.annotations
         merged_meta = Metadata(annotations=all_annots, line=meta.line, col=meta.col)
 
+        self._expect(TK.LBRACE)
         op = self._parse_patch_op()
+        self._expect(TK.RBRACE)
         return PatchDef(target=target, op=op, metadata=merged_meta, line=line, col=col)
 
     def _parse_patch_op(self) -> "PatchOp":
@@ -854,7 +859,11 @@ class Parser:
             return PatchDelete(line=line, col=col)
         if self._check(TK.KW_RENAME_TO):
             self._advance()
-            new_name = self._expect(TK.IDENT).value
+            # rename_to 的新名称可能是 IDENT (snake_case) 或 TYPE_IDENT (PascalCase)
+            if self._check(TK.TYPE_IDENT):
+                new_name = self._advance().value
+            else:
+                new_name = self._expect(TK.IDENT).value
             meta = self._parse_metadata()
             cascade = True
             if ann := meta.get("cascade"):
@@ -862,7 +871,132 @@ class Parser:
             return PatchRename(new_name=new_name, cascade=cascade, line=line, col=col)
         if self._check(TK.KW_INSERT_CASE):
             return self._parse_insert_case(line, col)
-        raise ParseError("期望 Patch 操作（replace_with / insert_before / insert_after / delete / rename_to / insert_case）", self._cur)
+
+        # ── v1.1 高级重构原语 ──
+
+        # move_to #dest.path @cascade(true)
+        if self._check(TK.KW_MOVE_TO):
+            self._advance()
+            dest = self._expect(TK.STRUCT_REF).value
+            meta = self._parse_metadata()
+            cascade = True
+            if ann := meta.get("cascade"):
+                val = ann.args[0] if ann.args else True
+                cascade = val if isinstance(val, bool) else str(val).lower() == "true"
+            return PatchMoveTo(dest_path=dest, cascade=cascade, line=line, col=col)
+
+        # copy_to #dest.path new_name: name
+        if self._check(TK.KW_COPY_TO):
+            self._advance()
+            dest = self._expect(TK.STRUCT_REF).value
+            new_name = None
+            if self._check(TK.IDENT) and self._cur.value == "new_name":
+                self._advance()
+                self._expect(TK.COLON)
+                if self._check(TK.TYPE_IDENT):
+                    new_name = self._advance().value
+                else:
+                    new_name = self._expect(TK.IDENT).value
+            return PatchCopyTo(dest_path=dest, new_name=new_name, line=line, col=col)
+
+        # wrap_with { template __BODY__ template }
+        if self._check(TK.KW_WRAP_WITH):
+            self._advance()
+            template = self._read_raw_block()
+            return PatchWrapWith(template=template, line=line, col=col)
+
+        # extract_interface TraitName methods: [m1, m2]
+        if self._check(TK.KW_EXTRACT_INTERFACE):
+            self._advance()
+            if self._check(TK.TYPE_IDENT):
+                iface_name = self._advance().value
+            else:
+                iface_name = self._expect(TK.IDENT).value
+            methods: list[str] = []
+            if self._check(TK.IDENT) and self._cur.value == "methods":
+                self._advance()
+                self._expect(TK.COLON)
+                self._expect(TK.LBRACKET)
+                while not self._check(TK.RBRACKET, TK.EOF):
+                    methods.append(self._expect(TK.IDENT).value)
+                    if not self._match(TK.COMMA):
+                        break
+                self._expect(TK.RBRACKET)
+            return PatchExtractInterface(interface_name=iface_name, methods=tuple(methods), line=line, col=col)
+
+        # resolve_patch(conflict_id: "...", resolution: "...")
+        if self._check(TK.KW_RESOLVE_PATCH):
+            self._advance()
+            self._expect(TK.LPAREN)
+            conflict_id = ""
+            resolution = ""
+            while not self._check(TK.RPAREN, TK.EOF):
+                key = self._expect(TK.IDENT).value
+                self._expect(TK.COLON)
+                val = self._expect(TK.STRING).value
+                if key == "conflict_id":
+                    conflict_id = val
+                elif key == "resolution":
+                    resolution = val
+                if not self._match(TK.COMMA):
+                    break
+            self._expect(TK.RPAREN)
+            return PatchResolvePatch(conflict_id=conflict_id, resolution=resolution, line=line, col=col)
+
+        # ── 参数/字段修改操作（可包含多条子操作） ──
+
+        # add_param name: Type = default @position(last)
+        if self._check(TK.KW_ADD_PARAM):
+            self._advance()
+            ops = [self._parse_param_patch_op("add")]
+            return PatchModifyParams(ops=tuple(ops), line=line, col=col)
+
+        # remove_param name
+        if self._check(TK.KW_REMOVE_PARAM):
+            self._advance()
+            name = self._expect(TK.IDENT).value
+            return PatchModifyParams(
+                ops=(ParamPatchOp(kind="remove", name=name, line=line, col=col),),
+                line=line, col=col
+            )
+
+        # add_field name: Type
+        if self._check(TK.KW_ADD_FIELD):
+            self._advance()
+            ops = [self._parse_field_patch_op("add")]
+            return PatchModifyFields(ops=tuple(ops), line=line, col=col)
+
+        # remove_field name
+        if self._check(TK.KW_REMOVE_FIELD):
+            self._advance()
+            name = self._expect(TK.IDENT).value
+            return PatchModifyFields(
+                ops=(FieldPatchOp(kind="remove", name=name, line=line, col=col),),
+                line=line, col=col
+            )
+
+        # change_type name: OldType => NewType
+        if self._check(TK.KW_CHANGE_TYPE):
+            self._advance()
+            name = self._expect(TK.IDENT).value
+            self._expect(TK.COLON)
+            old_ty = self._parse_type_expr()
+            self._expect(TK.FAT_ARROW)
+            new_ty = self._parse_type_expr()
+            meta = self._parse_metadata()
+            return PatchModifyFields(
+                ops=(FieldPatchOp(kind="change_type", name=name, ty=old_ty, new_ty=new_ty,
+                                  annotations=meta.annotations, line=line, col=col),),
+                line=line, col=col
+            )
+
+        raise ParseError(
+            "期望 Patch 操作（replace_with / insert_before / insert_after / delete / "
+            "rename_to / insert_case / move_to / copy_to / wrap_with / "
+            "extract_interface / resolve_patch / add_param / remove_param / "
+            "add_field / remove_field / change_type）",
+            self._cur
+        )
 
     def _parse_insert_case(self, line: int, col: int) -> PatchInsertCase:
         self._expect(TK.KW_INSERT_CASE)
@@ -879,6 +1013,30 @@ class Parser:
         self._expect(TK.RBRACE)
         return PatchInsertCase(position=position, anchor_ref=anchor_tok.value,
                                variants=tuple(variants), line=line, col=col)
+
+    def _parse_param_patch_op(self, kind: str) -> ParamPatchOp:
+        """解析 add_param 的参数: name: Type = default @position(...)"""
+        line, col = self._here()
+        name = self._expect(TK.IDENT).value
+        self._expect(TK.COLON)
+        ty = self._parse_type_expr()
+        default_val = None
+        if self._match(TK.EQ):
+            # 简单处理：读取默认值为单token
+            default_val = self._advance().value
+        meta = self._parse_metadata()
+        return ParamPatchOp(kind=kind, name=name, ty=ty, default=default_val,
+                            annotations=meta.annotations, line=line, col=col)
+
+    def _parse_field_patch_op(self, kind: str) -> FieldPatchOp:
+        """解析 add_field 的字段: name: Type"""
+        line, col = self._here()
+        name = self._expect(TK.IDENT).value
+        self._expect(TK.COLON)
+        ty = self._parse_type_expr()
+        meta = self._parse_metadata()
+        return FieldPatchOp(kind=kind, name=name, ty=ty,
+                            annotations=meta.annotations, line=line, col=col)
 
     def _read_raw_block(self) -> str:
         """读取 { ... } 块的原始文本（用于 patch 内容暂存）。"""
@@ -981,6 +1139,76 @@ class Parser:
             parts.append(self._cur.value)
             self._advance()
         return ' '.join(parts)
+
+
+    # ── Query 分析（v0.3） ──────────────────────────
+
+    def _parse_query_def(self, meta: Metadata) -> QueryDef:
+        line, col = self._here()
+        self._expect(TK.KW_QUERY)
+        
+        # 允许多余的 metadata （例如 query @id("...")）
+        extra_meta = self._parse_metadata()
+        # print("DEBUG extra_meta:", extra_meta)
+        merged_meta = Metadata(annotations=meta.annotations + extra_meta.annotations, line=meta.line, col=meta.col)
+        
+        self._expect(TK.LBRACE)
+
+        # find <target>
+        self._expect(TK.KW_FIND)
+        find_target_token = self._advance()
+        find_target = find_target_token.value
+
+        # where <clauses>
+        where_clauses = []
+        while self._check(TK.KW_WHERE):
+            w_line, w_col = self._here()
+            self._advance()
+            
+            # 由于 Query 的 where 语法可以是带有函数的断言：has_effect(!IO), param_count(> 4) 等
+            # 为了 v0.3 的简易性，这里先用简单的 token 序列将其保存为字符串形式
+            pred_tokens = []
+            while not self._check(TK.KW_WHERE, TK.KW_RETURN, TK.KW_LIMIT, TK.RBRACE, TK.EOF):
+                tok = self._advance()
+                pred_tokens.append(str(tok.value))
+            where_clauses.append(QueryWhere(predicate=" ".join(pred_tokens), line=w_line, col=w_col))
+
+        # return [<fields>]
+        self._expect(TK.KW_RETURN)
+        self._expect(TK.LBRACKET)
+        fields = []
+        while not self._check(TK.RBRACKET, TK.EOF):
+            if self._check(TK.AT):
+                at_tok = self._advance()
+                if self._check(TK.IDENT):
+                    fields.append(f"@{self._advance().value}")
+                else:
+                    fields.append("@")
+            elif self._check(TK.ANNOT):
+                fields.append(str(self._advance().value))
+            else:
+                fields.append(str(self._advance().value))
+                
+            if not self._match(TK.COMMA):
+                break
+        self._expect(TK.RBRACKET)
+
+        # limit <count>
+        limit_node = None
+        if self._match(TK.KW_LIMIT):
+            count_tok = self._expect(TK.INTEGER)
+            limit_node = QueryLimit(count=int(count_tok.value), line=count_tok.line, col=count_tok.col)
+            
+        self._expect(TK.RBRACE)
+
+        return QueryDef(
+            find=QueryFind(target=find_target, line=line, col=col),
+            where_clauses=tuple(where_clauses),
+            ret=QueryReturn(fields=tuple(fields), line=line, col=col),
+            limit=limit_node,
+            metadata=merged_meta,
+            line=line, col=col
+        )
 
 
 # ─────────────────────────────────────────────

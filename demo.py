@@ -14,10 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from anna.lexer        import tokenize, TK
 from anna.parser       import parse
 from anna.patch_engine import PatchEngine, apply_patches
+from anna.query_engine import QueryEngine
 from anna.ast_nodes    import (
     PatchDef, PatchGroupDef, PatchTarget, PatchDelete, PatchRename,
     PatchInsertCase, EnumVariant, FieldDef, TypeName, Metadata,
-    Annotation, Program
+    Annotation, Program, QueryDef
 )
 
 

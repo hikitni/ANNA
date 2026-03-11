@@ -13,6 +13,7 @@ anna/patch_engine.py
 
 from __future__ import annotations
 import json
+import re
 import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,10 +26,46 @@ from .ast_nodes import (
     PatchModifyParams, PatchModifyFields,
     PatchMoveTo, PatchCopyTo, PatchWrapWith, PatchExtractInterface, PatchResolvePatch,
     ConflictDef, ProofDef,
-    StructTypeDef, EnumTypeDef, AliasTypeDef, TypeName,
+    StructTypeDef, EnumTypeDef, AliasTypeDef, TypeName, GenericType,
     EnumVariant, FieldDef, Metadata, Annotation, Param,
     TopLevelItem,
 )
+
+# ── @requires_state 约束正则 ───────────────────
+# 格式 1: "#auth.User.id == Int32"  (字段类型断言)
+_RS_FIELD_TYPE_RE = re.compile(
+    r'#([\w.]+)\.(\w+)\s*(==|!=)\s*(\w+)'
+)
+# 格式 2: "#path exists"
+_RS_EXISTS_RE = re.compile(
+    r'#([\w.]+)\s+exists'
+)
+# 格式 3: "#path.variant_count == N"
+_RS_VARIANT_COUNT_RE = re.compile(
+    r'#([\w.]+)\.variant_count\s*(==|!=|>|<|>=|<=)\s*(\d+)'
+)
+
+
+def _type_name_str(ty: Any) -> str:
+    """将 TypeExpr 转为简短字符串（用于断言比对）。"""
+    if ty is None:
+        return "?"
+    if isinstance(ty, TypeName):
+        return ty.name
+    if isinstance(ty, GenericType):
+        inner = ", ".join(_type_name_str(p) for p in ty.params)
+        return f"{ty.base}<{inner}>"
+    return str(ty)
+
+
+def _rs_compare(a: int, op: str, b: int) -> bool:
+    if op == "==": return a == b
+    if op == "!=": return a != b
+    if op == ">":  return a > b
+    if op == "<":  return a < b
+    if op == ">=": return a >= b
+    if op == "<=": return a <= b
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -567,24 +604,90 @@ class PatchEngine:
         return Program(module=program.module, items=tuple(new_items),
                        line=program.line, col=program.col)
 
-    # ── @requires_state 断言检查（v1.1 Section 2）──────────────────
+    # ── @requires_state 断言检查（v1.1 Section 2 / v0.3.5 完整实现）──
 
     def _check_requires_state(
         self, ann: Annotation, path: str, program: Program
     ) -> tuple[bool, str]:
         """
         验证 @requires_state("constraint") 约束，返回 (passed, message)。
-        原型：检查目标节点存在即通过。
-        完整实现应将约束表达式解析为谓词并与 AST 当前状态比对。
+
+        支持三类断言格式：
+          1. "#path.field == TypeName"  — 字段类型匹配
+          2. "#path exists"             — 节点存在性
+          3. "#path.variant_count == N" — 枚举变体数量
         """
         if not ann.args:
             return True, "ok"
-        constraint = str(ann.args[0])
+        constraint = str(ann.args[0]).strip()
         resolver = PathResolver(program)
-        if resolver.resolve(path) is None:
-            return False, f"目标节点不存在: {path}"
-        # 原型级别：存在即满足
-        return True, f"ok (原型验证): {constraint!r}"
+
+        # ── 格式 2: "#path exists" ──
+        m = _RS_EXISTS_RE.match(constraint)
+        if m:
+            target = m.group(1)
+            resolved = resolver.resolve(target)
+            if resolved is None:
+                return False, f"节点不存在: {target}"
+            return True, f"ok: {target} 存在"
+
+        # ── 格式 3: "#path.variant_count == N" ──
+        m = _RS_VARIANT_COUNT_RE.match(constraint)
+        if m:
+            target, op_str, expected = m.group(1), m.group(2), int(m.group(3))
+            resolved = resolver.resolve(target)
+            if resolved is None:
+                return False, f"节点不存在: {target}"
+            _, node = resolved
+            if isinstance(node, EnumTypeDef):
+                actual = len(node.variants)
+                if _rs_compare(actual, op_str, expected):
+                    return True, f"ok: variant_count {actual} {op_str} {expected}"
+                return False, f"variant_count 断言失败: 实际 {actual} {op_str} {expected} 不成立"
+            return False, f"节点不是枚举类型: {target}"
+
+        # ── 格式 1: "#path.field == TypeName" ──
+        m = _RS_FIELD_TYPE_RE.match(constraint)
+        if m:
+            target, field_name, op_str, expected_type = (
+                m.group(1), m.group(2), m.group(3), m.group(4)
+            )
+            resolved = resolver.resolve(target)
+            if resolved is None:
+                return False, f"节点不存在: {target}"
+            _, node = resolved
+            # 在结构体中查找字段
+            if isinstance(node, StructTypeDef):
+                for f in node.fields:
+                    if f.name == field_name:
+                        actual_type = _type_name_str(f.ty)
+                        if op_str == "==" and actual_type == expected_type:
+                            return True, f"ok: {field_name} 类型为 {actual_type}"
+                        elif op_str == "!=" and actual_type != expected_type:
+                            return True, f"ok: {field_name} 类型不为 {expected_type}"
+                        return False, (
+                            f"字段类型断言失败: {field_name} 实际类型 {actual_type}，"
+                            f"期望 {op_str} {expected_type}"
+                        )
+                return False, f"字段 {field_name} 不存在于 {target}"
+            # 在函数参数中查找
+            if isinstance(node, FnDef):
+                for p in node.params:
+                    if p.name == field_name:
+                        actual_type = _type_name_str(p.ty)
+                        if op_str == "==" and actual_type == expected_type:
+                            return True, f"ok: 参数 {field_name} 类型为 {actual_type}"
+                        elif op_str == "!=" and actual_type != expected_type:
+                            return True, f"ok: 参数 {field_name} 类型不为 {expected_type}"
+                        return False, (
+                            f"参数类型断言失败: {field_name} 实际类型 {actual_type}，"
+                            f"期望 {op_str} {expected_type}"
+                        )
+                return False, f"参数 {field_name} 不存在于 {target}"
+            return False, f"节点类型不支持字段断言: {type(node).__name__}"
+
+        # ── 兜底：无法识别的约束格式 ──
+        return False, f"无法解析的 @requires_state 约束: {constraint!r}"
 
     # ── v1.1 高级重构原语（Section 5）──────────────────────────────
 

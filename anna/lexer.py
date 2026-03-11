@@ -60,6 +60,8 @@ class TK(Enum):
     KW_QUERY       = auto()
     KW_FIND        = auto()
     KW_LIMIT       = auto()
+    KW_AND         = auto()
+    KW_OR          = auto()
 
     # Patch 操作关键字
     KW_REPLACE_WITH     = auto()
@@ -177,6 +179,8 @@ KEYWORDS: dict[str, TK] = {
     "query":         TK.KW_QUERY,
     "find":          TK.KW_FIND,
     "limit":         TK.KW_LIMIT,
+    "and":           TK.KW_AND,
+    "or":            TK.KW_OR,
     "true":          TK.BOOL,
     "false":         TK.BOOL,
     # Patch ops
@@ -294,7 +298,7 @@ _FLOAT_RE        = re.compile(r'[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?')
 # 支持隐式索引扩展（v1.1 Section 1）：
 #   #module.fn/closure@1   —— 第 1 处闭包
 #   #module.fn/match[2]    —— 第 2 个 match 块
-_STRUCT_REF_RE   = re.compile(r'#[a-z_][a-z0-9_.]*(?:/[a-z_]+(?:@[0-9]+|\[[0-9]+\]))?')
+_STRUCT_REF_RE   = re.compile(r'#[a-zA-Z_][a-zA-Z0-9_.]*(?:/[a-zA-Z_]+(?:@[0-9]+|\[[0-9]+\]))?')
 
 
 class Lexer:

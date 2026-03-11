@@ -165,7 +165,8 @@ Effect 系统让 AI 在不执行代码的情况下判断：
 | v0.1 | 语言规范 + 词法/语法解析器原型（Python） | ✅ 完成 |
 | v0.2 | Patch 引擎（结构化 diff/apply） | ✅ 完成 |
 | **v1.1** | **隐式索引寻址 · `@requires_state` · `proof` · 高级重构原语** | ✅ **完成** |
-| v0.3 | 查询引擎（`query { find fn where ... }` 可执行） | 🔲 计划中 |
+| v0.3 | 查询引擎（`query { find fn where ... }` 可执行） | ✅ **完成** |
+| v0.3.5 | `@requires_state` 运行时断言 · 高级重构原语 Parser 完整接入 | ✅ **完成** |
 | v0.4 | 类型检查器 + **Effect 自动传播引擎** + Rust 增量解析器 | 🔲 计划中 |
 | v0.5 | LSP 服务（供 AI 工具调用）· **天然语言 Diff 渲染（Human Mode）** | 🔲 计划中 |
 | v0.6 | 宏/简写 Patch 展开（Token 经济学优化） | 🔲 计划中 |
